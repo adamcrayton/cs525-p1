@@ -1,14 +1,22 @@
-#include "lab.h"
+#include "protocol.h"
+#include "session.h"
+#include "socket_transport.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 
+/* The test build (-DTEST) compiles every file under src/ together with
+ * the test binary's own main() in lab-test.c, so main() here must get
+ * out of the way rather than collide with it. */
 #ifdef TEST
 #define main main_exclude
 #endif
 
 #include <getopt.h>
 #include <string.h>
-#include <unistd.h>
+
+#define EXIT_USAGE_ERR 1
+#define EXIT_SMTP_ERR 2
 
 static void print_usage(FILE *out, const char *prog) {
     fprintf(out,
@@ -25,24 +33,72 @@ static void print_usage(FILE *out, const char *prog) {
         prog);
 }
 
+static char *read_stdin_body(void) {
+    size_t cap = 4096;
+    size_t len = 0;
+    char *buf = malloc(cap);
+
+    if (buf == NULL) {
+        return NULL;
+    }
+
+    for (;;) {
+        size_t n;
+
+        if (len + 4096 > cap) {
+            char *new_buf;
+
+            cap *= 2;
+            new_buf = realloc(buf, cap);
+            if (new_buf == NULL) {
+                free(buf);
+                return NULL;
+            }
+            buf = new_buf;
+        }
+
+        n = fread(buf + len, 1, 4096, stdin);
+        len += n;
+
+        if (n < 4096) {
+            if (ferror(stdin)) {
+                free(buf);
+                return NULL;
+            }
+            break; /* EOF reached */
+        }
+    }
+
+    if (len >= cap) {
+        char *new_buf = realloc(buf, len + 1);
+        if (new_buf == NULL) {
+            free(buf);
+            return NULL;
+        }
+        buf = new_buf;
+    }
+
+    buf[len] = '\0';
+    return buf;
+}
+
 int main(int argc, char *argv[]) {
     const char *from = NULL;
     const char *to = NULL;
     const char *subject = "";
-    const char *body = NULL;
     const char *port = "25";
     const char *helo_host = "localhost";
     const char *server = NULL;
+    const char *body_arg = NULL;
     char *body = NULL;
     int owns_body = 0;
     int opt;
-    int sock = -1;
-    char helo_cmd[512];
-    char mail_cmd[512];
-    char rcpt_cmd[512];
+    socket_transport_t st;
     int result = EXIT_SMTP_ERR;
 
-    /* make leak runs with no arguments and expects a clean exit*/
+    st.fd = -1;
+
+    /* make leak runs with no arguments and expects a clean exit */
     if (argc == 1) {
         print_usage(stdout, argv[0]);
         return 0;
@@ -60,8 +116,7 @@ int main(int argc, char *argv[]) {
                 subject = optarg;
                 break;
             case 'b':
-                body = optarg;
-                owns_body = 1; // We own the body string and should free it later
+                body_arg = optarg;
                 break;
             case 'p':
                 port = optarg;
@@ -88,74 +143,46 @@ int main(int argc, char *argv[]) {
         return EXIT_USAGE_ERR;
     }
 
-    if (has_bare_crlf(from) || has_bare_crlf(to) || has_bare_crlf(subject) || has_bare_crlf(helo_host) || has_bare_crlf(server)) {
+    if (protocol_has_bare_crlf(from) || protocol_has_bare_crlf(to) ||
+        protocol_has_bare_crlf(subject) || protocol_has_bare_crlf(helo_host) ||
+        protocol_has_bare_crlf(server)) {
         fprintf(stderr, "myapp: argument must not contain bare CR or LF\n");
         return EXIT_USAGE_ERR;
     }
 
     if (body_arg != NULL) {
         body = (char *)body_arg;
-        owns_body = 0; // We do not own the body string, do not free it
+        owns_body = 0; /* points into argv - do not free */
     } else {
         body = read_stdin_body();
         if (body == NULL) {
             fprintf(stderr, "myapp: failed to read body from stdin\n");
             return EXIT_SMTP_ERR;
         }
-        owns_body = 1; // We own the body string and should free it later
+        owns_body = 1;
     }
 
-    sock = connect_to_server(server, port);
-    if (sock == -1) {
-        goto cleanup;
-    }
-
-    snprintf(helo_cmd, sizeof(helo_cmd), "HELO %s", helo_host);
-    if (send_command_expect(sock, helo_cmd, 250) != 0) {
-        goto cleanup;
-    }
-
-    snprintf(mail_cmd, sizeof(mail_cmd), "MAIL FROM:<%s>", from);
-    if (send_command_expect(sock, mail_cmd, 250) != 0) {
-        goto cleanup;
-    }
-
-    snprintf(rcpt_cmd, sizeof(rcpt_cmd), "RCPT TO:<%s>", to);
-    if (send_command_expect(sock, rcpt_cmd, 250) != 0) {
-        goto cleanup;
-    }
-
-    if (send_command_expect(sock, "DATA", 354) != 0) {
-        goto cleanup;
-    }
-
-    if (send_message_data(sock, from, to, subject, body) != 0) {
+    if (socket_transport_connect(&st, server, port) != 0) {
         goto cleanup;
     }
 
     {
-        char last_line[1024];
-        int code = read_smtp_response(sock, last_line, sizeof(last_line));
+        smtp_message_t msg;
+        msg.from = from;
+        msg.to = to;
+        msg.subject = subject;
+        msg.body = body;
+        msg.helo_host = helo_host;
 
-        if (code != 250) {
-            fprintf(stderr, "myapp: expected 250 after RCPT TO but server said: %s\n", last_line);
-            goto cleanup;
+        if (session_run(&st.transport, &msg) == 0) {
+            result = 0;
         }
     }
 
-    if (send_command_expect(sock, "QUIT", 221) != 0) {
-        goto cleanup;
+cleanup:
+    socket_transport_close(&st);
+    if (owns_body && body != NULL) {
+        free(body);
     }
-
-    result = 0;
-
-    cleanup:
-        if (sock != -1) {
-            close(sock);
-        }
-        if (owns_body && body != NULL) {
-            free(body);
-        }
-
-        return result;
+    return result;
 }
