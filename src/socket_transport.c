@@ -48,9 +48,11 @@ int socket_transport_connect(socket_transport_t *st, const char *host, const cha
 
     for (rp = res; rp != NULL; rp = rp->ai_next) {
         sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        /* GCOVR_EXCL_START - socket() failure isn't reproducible on demand */
         if (sock == -1) {
             continue;
         }
+        /* GCOVR_EXCL_STOP */
         if (connect(sock, rp->ai_addr, rp->ai_addrlen) == 0) {
             break; /* success */
         }

@@ -11,6 +11,12 @@
  * "reply split across several reads" as easily as "reply delivered
  * whole". Everything the client writes is appended to `sent`, so a
  * test can assert on the exact commands the session sent.
+ *
+ * force_read_error and fail_write_after_calls simulate a broken
+ * transport (recv()/send() returning -1) without needing an actual
+ * socket, so session.c's transport-error branches can be driven
+ * deterministically. Both default to "never fail" (0) after
+ * mock_transport_init.
  */
 typedef struct {
     transport_t transport;
@@ -21,6 +27,9 @@ typedef struct {
     char *sent;
     size_t sent_len;
     size_t sent_cap;
+    int force_read_error;          /* nonzero: every read() call returns -1 */
+    size_t fail_write_after_calls; /* 0 = never fail; N>0 = the Nth write() call onward returns -1 */
+    size_t write_call_count;       /* internal - number of write() calls made so far */
 } mock_transport_t;
 
 void mock_transport_init(mock_transport_t *mt, const char *script, size_t chunk_size);

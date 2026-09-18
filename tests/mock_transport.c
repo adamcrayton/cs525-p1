@@ -5,9 +5,14 @@
 
 static ssize_t mock_read(void *ctx, char *buf, size_t len) {
     mock_transport_t *mt = (mock_transport_t *)ctx;
-    size_t remaining = mt->script_len - mt->script_pos;
+    size_t remaining;
     size_t want;
 
+    if (mt->force_read_error) {
+        return -1;
+    }
+
+    remaining = mt->script_len - mt->script_pos;
     if (remaining == 0) {
         return 0; /* EOF */
     }
@@ -28,15 +33,22 @@ static ssize_t mock_read(void *ctx, char *buf, size_t len) {
 static ssize_t mock_write(void *ctx, const char *buf, size_t len) {
     mock_transport_t *mt = (mock_transport_t *)ctx;
 
+    mt->write_call_count++;
+    if (mt->fail_write_after_calls > 0 && mt->write_call_count >= mt->fail_write_after_calls) {
+        return -1;
+    }
+
     if (mt->sent_len + len + 1 > mt->sent_cap) {
         size_t new_cap = mt->sent_cap == 0 ? 256 : mt->sent_cap * 2;
         while (new_cap < mt->sent_len + len + 1) {
             new_cap *= 2;
         }
         char *new_data = realloc(mt->sent, new_cap);
+        /* GCOVR_EXCL_START - unreachable without a simulated OOM */
         if (new_data == NULL) {
             return -1;
         }
+        /* GCOVR_EXCL_STOP */
         mt->sent = new_data;
         mt->sent_cap = new_cap;
     }
@@ -57,6 +69,9 @@ void mock_transport_init(mock_transport_t *mt, const char *script, size_t chunk_
     mt->sent = NULL;
     mt->sent_len = 0;
     mt->sent_cap = 0;
+    mt->force_read_error = 0;
+    mt->fail_write_after_calls = 0;
+    mt->write_call_count = 0;
 }
 
 void mock_transport_free(mock_transport_t *mt) {
